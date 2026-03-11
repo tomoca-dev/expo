@@ -1,0 +1,8 @@
+{
+  "name": "TOMOCA Export Risk Management (ERM) Platform",
+  "description": "A sophisticated prototype for an AI-powered export operations dashboard, providing real-time risk assessment, automated documentation, and intelligent financial tracking for coffee exports.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
