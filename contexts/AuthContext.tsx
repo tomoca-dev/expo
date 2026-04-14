@@ -97,7 +97,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
     };
 
-    init();
+    const fallbackTimer = setTimeout(() => {
+      if (mounted) setLoading(false);
+    }, 5000);
+
+    init().finally(() => clearTimeout(fallbackTimer));
 
     if (!supabase) return () => { mounted = false; };
 

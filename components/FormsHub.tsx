@@ -394,7 +394,7 @@ const FormsHub: React.FC = () => {
               <option value="">-- SYNC WITH SHIPMENT --</option>
               {state.shipments.map((s) => (
                 <option key={s.id} value={s.id}>
-                  {(s.referenceNumber || s.id)} :: {(s.buyerName || 'UNKNOWN BUYER').toUpperCase()}
+                  {(s.buyerName || 'UNKNOWN BUYER').toUpperCase()}
                 </option>
               ))}
             </select>

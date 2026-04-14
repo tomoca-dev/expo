@@ -347,14 +347,22 @@ const InnerApp = () => {
         return;
       }
 
+      const FETCH_TIMEOUT_MS = 10_000;
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('Data fetch timed out after 10s')), FETCH_TIMEOUT_MS)
+      );
+
       try {
-        const results = await Promise.allSettled([
-          supabase.from('shipments').select('*'),
-          supabase.from('buyers').select('*'),
-          supabase.from('documents').select('*'),
-          supabase.from('routes').select('*'),
-          supabase.from('lots').select('*'),
-          supabase.from('buyer_receipts').select('*'),
+        const results = await Promise.race([
+          Promise.allSettled([
+            supabase.from('shipments').select('*'),
+            supabase.from('buyers').select('*'),
+            supabase.from('documents').select('*'),
+            supabase.from('routes').select('*'),
+            supabase.from('lots').select('*'),
+            supabase.from('buyer_receipts').select('*'),
+          ]),
+          timeoutPromise,
         ]);
 
         const [shpRes, buyRes, docRes, routeRes, lotRes, receiptRes] = results.map((r) =>
@@ -414,7 +422,7 @@ const InnerApp = () => {
     };
 
     void fetchInitialData();
-  }, [user, authLoading]);
+  }, [user?.id, authLoading]);
 
   useEffect(() => {
     if ((import.meta as any)?.env?.VITE_GEMINI_API_KEY) {
@@ -698,7 +706,10 @@ const InnerApp = () => {
       <div className="h-screen bg-[#0A0A0A] flex flex-col items-center justify-center space-y-6">
         <Logo className="w-20 h-20 animate-pulse" />
         <div className="text-[10px] font-black text-[#D4AF37] uppercase tracking-[0.5em]">
-          Syncing Encryption Keys...
+          Loading System Data...
+        </div>
+        <div className="text-[8px] font-bold text-white/20 uppercase tracking-widest">
+          Establishing secure connection
         </div>
       </div>
     );
