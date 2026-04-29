@@ -156,16 +156,14 @@ const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
             <Link
               key={item.name}
               to={item.path}
-              className={`group flex items-center space-x-3 px-4 py-3.5 rounded-xl transition-all relative overflow-hidden ${
-                location.pathname === item.path
+              className={`group flex items-center space-x-3 px-4 py-3.5 rounded-xl transition-all relative overflow-hidden ${location.pathname === item.path
                   ? 'bg-gradient-to-r from-[#D4AF37]/20 to-transparent text-[#D4AF37] border-l-2 border-[#D4AF37]'
                   : 'text-white/50 hover:text-white hover:bg-white/5'
-              }`}
+                }`}
             >
               <item.icon
-                className={`w-5 h-5 transition-transform duration-300 group-hover:scale-110 ${
-                  location.pathname === item.path ? 'drop-shadow-[0_0_8px_rgba(212,175,55,0.6)]' : ''
-                }`}
+                className={`w-5 h-5 transition-transform duration-300 group-hover:scale-110 ${location.pathname === item.path ? 'drop-shadow-[0_0_8px_rgba(212,175,55,0.6)]' : ''
+                  }`}
               />
               <span className="text-sm font-semibold tracking-wide uppercase">{item.name}</span>
             </Link>
@@ -191,11 +189,10 @@ const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
                   key={cur}
                   disabled={isSyncingRates}
                   onClick={() => void setDisplayCurrency(cur)}
-                  className={`flex-1 py-1.5 text-[10px] font-black rounded-lg transition-all ${
-                    state.displayCurrency === cur
+                  className={`flex-1 py-1.5 text-[10px] font-black rounded-lg transition-all ${state.displayCurrency === cur
                       ? 'bg-[#D4AF37] text-black'
                       : 'text-white/40 hover:text-white disabled:opacity-20'
-                  }`}
+                    }`}
                 >
                   {cur}
                 </button>
@@ -335,7 +332,7 @@ const InnerApp = () => {
     const fetchInitialData = async () => {
       setIsLoading(true);
 
-      if (!supabase || !user) {
+      if (!supabase) {
         setShipments([]);
         setBuyers([]);
         setDocuments([]);
@@ -347,50 +344,65 @@ const InnerApp = () => {
         return;
       }
 
-      const FETCH_TIMEOUT_MS = 10_000;
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('Data fetch timed out after 10s')), FETCH_TIMEOUT_MS)
-      );
-
-      try {
-        const results = await Promise.race([
-          Promise.allSettled([
-            supabase.from('shipments').select('*'),
-            supabase.from('buyers').select('*'),
-            supabase.from('documents').select('*'),
-            supabase.from('routes').select('*'),
-            supabase.from('lots').select('*'),
-            supabase.from('buyer_receipts').select('*'),
-          ]),
-          timeoutPromise,
+      // Wrap each query with its own timeout so one broken table never blocks the rest
+      const PER_QUERY_TIMEOUT_MS = 12_000;
+      const withTimeout = <T,>(promise: Promise<T>): Promise<T | { data: null; error: Error }> =>
+        Promise.race([
+          promise,
+          new Promise<{ data: null; error: Error }>((resolve) =>
+            setTimeout(
+              () => resolve({ data: null, error: new Error('Query timed out') }),
+              PER_QUERY_TIMEOUT_MS
+            )
+          ),
         ]);
 
-        const [shpRes, buyRes, docRes, routeRes, lotRes, receiptRes] = results.map((r) =>
-          r.status === 'fulfilled' ? r.value : { data: [], error: r.reason }
-        );
+      try {
+        const rawFetch = async (table: string) => {
+          const res = await fetch(`${(import.meta as any).env.VITE_SUPABASE_URL}/rest/v1/${table}?select=*`, {
+            headers: { 'apikey': (import.meta as any).env.VITE_SUPABASE_ANON_KEY }
+          });
+          return { data: await res.json(), error: res.status !== 200 ? new Error(`HTTP ${res.status}`) : null };
+        };
 
-        const buyersUi = Array.isArray(buyRes.data)
+        const [buyRes, lotRes, shpRes, docRes, routeRes, receiptRes] = await Promise.all([
+          rawFetch('buyers'),
+          rawFetch('lots'),
+          rawFetch('shipments'),
+          rawFetch('documents'),
+          rawFetch('routes'),
+          rawFetch('buyer_receipts'),
+        ]);
+
+        if (buyRes?.error) console.warn('Failed to load buyers', buyRes.error);
+        if (shpRes?.error) console.warn('Failed to load shipments', shpRes.error);
+        if (docRes?.error) console.warn('Failed to load documents', docRes.error);
+        if (routeRes?.error) console.warn('Failed to load routes', routeRes.error);
+        if (lotRes?.error) console.warn('Failed to load lots', lotRes.error);
+        if (receiptRes?.error) console.warn('Failed to load buyer_receipts', receiptRes.error);
+
+        const buyersUi = Array.isArray(buyRes?.data)
           ? buyRes.data.map((x: any) => dbBuyerToUi(x as DbBuyer))
           : [];
 
-        const shipmentsUi = Array.isArray(shpRes.data)
+        const shipmentsUi = Array.isArray(shpRes?.data)
           ? shpRes.data.map((x: any) => ensureShipmentIntelligence(dbShipmentToUi(x as DbShipment)))
           : [];
 
-        const docsUi = Array.isArray(docRes.data)
+        const docsUi = Array.isArray(docRes?.data)
           ? docRes.data.map((x: any) => dbDocumentToUi(x as DbDocument))
           : [];
 
-        const routesUi = Array.isArray(routeRes.data)
+        const routesUi = Array.isArray(routeRes?.data)
           ? routeRes.data.map((x: any) => dbRouteToUi(x as DbRoute))
           : [];
 
-        const lotsUi = Array.isArray(lotRes.data)
+        const lotsUi = Array.isArray(lotRes?.data)
           ? lotRes.data.map((x: any) => dbLotToUi(x as DbLot))
           : [];
 
         const receiptMap: Record<string, Record<string, BuyerReceipt>> = {};
-        if (Array.isArray(receiptRes.data)) {
+        if (Array.isArray(receiptRes?.data)) {
           for (const r of receiptRes.data as any[]) {
             const key = String(r.buyer_id ?? '').toUpperCase();
             if (!key) continue;
@@ -410,12 +422,7 @@ const InnerApp = () => {
         setBuyerReceipts(receiptMap);
       } catch (error) {
         console.error('DATA FETCH ERROR:', error);
-        setShipments([]);
-        setBuyers([]);
-        setDocuments([]);
-        setRoutes([]);
-        setLots([]);
-        setBuyerReceipts({});
+        // Don't wipe existing state on unexpected error — leave whatever loaded
       } finally {
         setIsLoading(false);
       }
@@ -635,10 +642,10 @@ const InnerApp = () => {
         profile?.buyer_id && profile.role === 'buyer'
           ? profile.buyer_id
           : buyers.find(
-              (b) =>
-                b.id.toUpperCase() === normalized ||
-                (b.portalCode ?? '').toUpperCase() === normalized
-            )?.id ?? normalized;
+            (b) =>
+              b.id.toUpperCase() === normalized ||
+              (b.portalCode ?? '').toUpperCase() === normalized
+          )?.id ?? normalized;
 
       if (!buyerId) throw new Error('Unable to resolve buyer for receipt acknowledgement.');
 
