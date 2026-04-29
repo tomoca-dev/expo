@@ -175,19 +175,21 @@ export function dbDocStatusToUi(s: string | null | undefined): Document['status'
 }
 
 // --- Buyer ---
-export function dbBuyerToUi(b: DbBuyer): Buyer {
+export function dbBuyerToUi(b: any): Buyer {
   return {
-    id: b.id,
-    name: b.name,
+    id: String(b.id),
+    name: b.name ?? 'Unnamed Buyer',
     country: b.country ?? 'Unknown',
-    totalRevenue: 0,
-    shipmentCount: 0,
-    riskScore: 0,
-    lastContact: b.updated_at?.slice(0, 10) ?? new Date().toISOString().slice(0, 10),
+    totalRevenue: Number(b.totalRevenue ?? b.total_revenue ?? 0),
+    shipmentCount: Number(b.shipmentCount ?? b.shipment_count ?? 0),
+    riskScore: Number(b.riskScore ?? b.risk_score ?? 0),
+    lastContact: (b.lastContact ?? b.last_contact ?? b.updated_at ?? b.created_at ?? new Date().toISOString()).slice(0, 10),
+    portalCode: b.portal_code ?? b.portalCode ?? undefined,
   };
 }
 
-export function uiBuyerToDb(b: Buyer): Partial<DbBuyer> {
+export function uiBuyerToDb(b: Buyer): any {
+  // Works with the current normalized schema. Extra UI fields are intentionally not required.
   return {
     id: b.id || undefined,
     name: b.name,
@@ -196,38 +198,45 @@ export function uiBuyerToDb(b: Buyer): Partial<DbBuyer> {
 }
 
 // --- Shipment ---
-export function dbShipmentToUi(s: DbShipment): Shipment {
+export function dbShipmentToUi(s: any): Shipment {
+  // Supports both schemas:
+  // 1) normalized: buyer_id, incoterm, notes JSON
+  // 2) older/camelCase: buyerName, coffeeType, riskLevel, paymentTerms, etc.
   const extra = safeParseJson(s.notes) ?? {};
-  const buyerName = s.buyers?.name ?? extra.buyerName ?? 'Unknown Buyer';
+  const buyerName = s.buyers?.name ?? s.buyerName ?? s.buyer_name ?? extra.buyerName ?? 'Unknown Buyer';
+  const createdDate = (s.date ?? s.created_at ?? new Date().toISOString()).slice(0, 10);
+
   return {
-    id: s.id,
-    buyerId: s.buyer_id ?? s.buyers?.id ?? undefined,
+    id: String(s.id),
+    buyerId: s.buyer_id ?? s.buyerId ?? s.buyers?.id ?? extra.buyerId ?? undefined,
     buyerName,
     destination: s.destination ?? extra.destination ?? '',
-    value: Number(extra.value ?? 0),
+    value: Number(s.value ?? extra.value ?? 0),
     currency: s.currency ?? extra.currency ?? 'USD',
-    status: extra.uiStatus ? (extra.uiStatus as ShipmentStatus) : dbShipmentStatusToUi(s.status),
-    riskLevel: extra.riskLevel ? (extra.riskLevel as RiskLevel) : RiskLevel.MEDIUM,
-    coffeeType: extra.coffeeType ?? 'Coffee',
-    weight: Number(extra.weight ?? 0),
-    date: (s.created_at ?? new Date().toISOString()).slice(0, 10),
-    margin: Number(extra.margin ?? 0),
-    incoterms: s.incoterm ?? extra.incoterms,
-    paymentTerms: extra.paymentTerms,
-    routeId: s.route_id ?? extra.routeId,
-    lotIds: extra.lotIds ?? [],
-    qualitySpec: extra.qualitySpec,
-    milestones: extra.milestones,
-    complianceChecklist: extra.complianceChecklist,
+    status: s.status && Object.values(ShipmentStatus).includes(s.status) ? s.status : (extra.uiStatus ? (extra.uiStatus as ShipmentStatus) : dbShipmentStatusToUi(s.status)),
+    riskLevel: (s.riskLevel ?? s.risk_level ?? extra.riskLevel ?? RiskLevel.MEDIUM) as RiskLevel,
+    coffeeType: s.coffeeType ?? s.coffee_type ?? extra.coffeeType ?? 'Coffee',
+    weight: Number(s.weight ?? extra.weight ?? 0),
+    date: createdDate,
+    margin: Number(s.margin ?? extra.margin ?? 0),
+    incoterms: s.incoterms ?? s.incoterm ?? extra.incoterms ?? 'FOB',
+    paymentTerms: s.paymentTerms ?? s.payment_terms ?? extra.paymentTerms,
+    routeId: s.route_id ?? s.routeId ?? extra.routeId,
+    lotIds: extra.lotIds ?? s.lotIds ?? [],
+    qualitySpec: extra.qualitySpec ?? s.qualitySpec,
+    milestones: extra.milestones ?? s.milestones,
+    complianceChecklist: extra.complianceChecklist ?? s.complianceChecklist,
     tasks: undefined,
   };
 }
 
-export function uiShipmentToDb(s: Shipment, buyerId?: string, routeId?: string | null): Partial<DbShipment> {
+export function uiShipmentToDb(s: Shipment, buyerId?: string, routeId?: string | null): any {
   const resolvedBuyerId = buyerId ?? s.buyerId;
   if (!resolvedBuyerId) throw new Error('buyerId is required for shipments');
+
   const extra = {
     buyerName: s.buyerName,
+    buyerId: resolvedBuyerId,
     destination: s.destination,
     value: s.value,
     currency: s.currency,
@@ -244,9 +253,10 @@ export function uiShipmentToDb(s: Shipment, buyerId?: string, routeId?: string |
     milestones: s.milestones ?? [],
     complianceChecklist: s.complianceChecklist ?? [],
   };
+
   return {
     id: s.id || undefined,
-    reference: s.id, // keep UI id visible
+    reference: s.id,
     buyer_id: resolvedBuyerId,
     route_id: routeId ?? s.routeId ?? null,
     status: uiShipmentStatusToDb(s.status),
@@ -259,27 +269,29 @@ export function uiShipmentToDb(s: Shipment, buyerId?: string, routeId?: string |
 }
 
 // --- Document ---
-export function dbDocumentToUi(d: DbDocument): Document {
+export function dbDocumentToUi(d: any): Document {
   return {
-    id: d.id,
-    shipmentId: d.shipment_id,
-    buyerId: d.buyer_id,
-    name: d.title,
-    type: dbDocTypeToUi(d.doc_type),
-    status: dbDocStatusToUi(d.status),
-    date: (d.created_at ?? new Date().toISOString()).slice(0, 10),
-    content: d.extracted_json ?? null,
-    buyerVisible: !!d.buyer_visible,
-    storagePath: d.storage_path ?? undefined,
+    id: String(d.id),
+    shipmentId: d.shipment_id ?? d.shipmentId ?? undefined,
+    buyerId: d.buyer_id ?? d.buyerId ?? undefined,
+    name: d.title ?? d.name ?? 'Untitled Document',
+    type: d.doc_type ? dbDocTypeToUi(d.doc_type) : (d.type ?? 'External Attachment'),
+    status: d.status && ['Draft', 'Approved', 'Pending Approval', 'Final'].includes(d.status) ? d.status : dbDocStatusToUi(d.status),
+    date: (d.date ?? d.created_at ?? new Date().toISOString()).slice(0, 10),
+    fileSize: d.fileSize ?? d.file_size ?? undefined,
+    isExternal: d.isExternal ?? d.is_external ?? false,
+    content: d.extracted_json ?? d.content ?? null,
+    buyerVisible: !!(d.buyer_visible ?? d.buyerVisible),
+    storagePath: d.storage_path ?? d.storagePath ?? undefined,
   };
 }
 
-export function uiDocumentToDb(doc: Document): Partial<DbDocument> {
+export function uiDocumentToDb(doc: Document): any {
   if (!doc.shipmentId) throw new Error('shipmentId is required for documents');
   return {
     id: doc.id || undefined,
     shipment_id: doc.shipmentId,
-    buyer_id: doc.buyerId as any, // DB trigger will enforce buyer_id from shipment_id
+    buyer_id: doc.buyerId ?? null,
     title: doc.name,
     doc_type: uiDocTypeToDb(doc.type),
     status: uiDocStatusToDb(doc.status),

@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import { supabase } from '../supabaseClient';
 
-type ProfileRole = 'admin' | 'buyer';
+type ProfileRole = 'admin' | 'buyer' | 'finance' | 'management' | 'sales';
 type ProfileStatus = 'pending' | 'active' | 'rejected';
 
 type Profile = {
@@ -27,38 +27,73 @@ export const useAuth = () => {
   return ctx;
 };
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const withTimeout = async <T,>(label: string, promise: Promise<T>, timeoutMs = 15000): Promise<T> => {
+  let timer: number | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = window.setTimeout(() => reject(new Error(`${label} timed out`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) window.clearTimeout(timer);
+  }
+};
+
+const loadProfileInternal = async (
+  uid: string,
+  setProfile: (p: Profile | null) => void
+) => {
+  if (!supabase) {
+    setProfile(null);
+    return;
+  }
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const { data, error } = await withTimeout(
+        'profile',
+        supabase
+          .from('profiles')
+          .select('id,email,role,status,buyer_id')
+          .eq('id', uid)
+          .maybeSingle()
+      );
+
+      if (error) throw error;
+
+      setProfile((data as Profile | null) ?? null);
+      return;
+    } catch (err: any) {
+      console.warn(`Profile fetch attempt ${attempt + 1} failed:`, err?.message || err);
+      
+      const isRecursion = String(err?.message || '').toLowerCase().includes('recursion');
+      if (isRecursion) {
+        console.error('CRITICAL: Infinite recursion detected in Supabase RLS policies. Retries stopped.');
+        setProfile(null);
+        return;
+      }
+
+      if (attempt < 2) {
+        await sleep(1000 * (attempt + 1));
+        continue;
+      }
+      setProfile(null);
+    }
+  }
+};
+
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<any | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const loadProfile = async (uid: string) => {
-    if (!supabase) {
-      setProfile(null);
-      return;
-    }
-
-    try {
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('id,email,role,status,buyer_id')
-        .eq('id', uid)
-        .maybeSingle();
-
-      console.log('PROFILE QUERY:', { uid, data, error });
-
-      if (error) {
-        console.error('Profile fetch error:', error);
-        setProfile(null);
-        return;
-      }
-
-      setProfile((data as Profile | null) ?? null);
-    } catch (err) {
-      console.error('Unexpected profile fetch error:', err);
-      setProfile(null);
-    }
-  };
+  const loadProfile = React.useCallback(async (uid: string) => {
+    await loadProfileInternal(uid, setProfile);
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -83,7 +118,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setUser(sessionUser);
 
         if (sessionUser) {
-          await loadProfile(sessionUser.id);
+          await loadProfileInternal(sessionUser.id, setProfile);
         } else {
           setProfile(null);
         }
@@ -105,22 +140,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     if (!supabase) return () => { mounted = false; };
 
-    const { data: subscription } = supabase.auth.onAuthStateChange(async (_event, session) => {
-      try {
-        const sessionUser = session?.user ?? null;
-        console.log('AUTH STATE CHANGE:', { event: _event, sessionUser });
+    const { data: subscription } = supabase.auth.onAuthStateChange((_event, session) => {
+      const sessionUser = session?.user ?? null;
+      console.log('AUTH STATE CHANGE:', { event: _event, sessionUser });
 
-        setUser(sessionUser);
+      setUser(sessionUser);
 
-        if (sessionUser) {
-          await loadProfile(sessionUser.id);
-        } else {
-          setProfile(null);
-        }
-      } catch (err) {
-        console.error('Auth state change error:', err);
+      if (sessionUser) {
+        void loadProfileInternal(sessionUser.id, setProfile).finally(() => {
+          setLoading(false);
+        });
+      } else {
         setProfile(null);
-      } finally {
         setLoading(false);
       }
     });

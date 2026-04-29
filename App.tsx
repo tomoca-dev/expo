@@ -329,81 +329,140 @@ const InnerApp = () => {
   useEffect(() => {
     if (authLoading) return;
 
+    let cancelled = false;
+
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    const isAuthOrNetworkError = (error: any) => {
+      const message = String(error?.message ?? error ?? '').toLowerCase();
+      const status = Number(error?.status ?? error?.code ?? 0);
+      return (
+        status === 401 ||
+        status === 403 ||
+        message.includes('jwt') ||
+        message.includes('token') ||
+        message.includes('session') ||
+        message.includes('fetch') ||
+        message.includes('network') ||
+        message.includes('timeout') ||
+        message.includes('timed out')
+      );
+    };
+
+    const refreshSupabaseSession = async () => {
+      if (!supabase) return;
+      try {
+        const { data } = await supabase.auth.getSession();
+        if (data.session) {
+          await supabase.auth.refreshSession();
+        }
+      } catch (error) {
+        console.warn('SESSION REFRESH FAILED:', error);
+      }
+    };
+
+    const withTimeout = async <T,>(label: string, promise: Promise<T>, timeoutMs = 25000): Promise<T> => {
+      let timer: number | undefined;
+      try {
+        return await Promise.race([
+          promise,
+          new Promise<T>((_, reject) => {
+            timer = window.setTimeout(() => reject(new Error(`${label} timed out`)), timeoutMs);
+          }),
+        ]);
+      } finally {
+        if (timer) window.clearTimeout(timer);
+      }
+    };
+
+    const queryTable = async (label: string, queryFactory: () => any, retries = 2): Promise<any[] | null> => {
+      for (let attempt = 0; attempt <= retries; attempt += 1) {
+        try {
+          const res = await withTimeout(label, queryFactory());
+
+          if (res?.error) {
+            throw res.error;
+          }
+
+          return Array.isArray(res?.data) ? res.data : [];
+        } catch (error: any) {
+          console.warn(`${label} load attempt ${attempt + 1} failed:`, error?.message || error);
+
+          if (attempt < retries && isAuthOrNetworkError(error)) {
+            await refreshSupabaseSession();
+            await sleep(700 * (attempt + 1));
+            continue;
+          }
+
+          return null;
+        }
+      }
+
+      return null;
+    };
+
     const fetchInitialData = async () => {
       setIsLoading(true);
 
-      if (!supabase) {
-        setShipments([]);
-        setBuyers([]);
-        setDocuments([]);
-        setRoutes([]);
-        setLots([]);
-        setBuyerReceipts({});
-        setDismissedAlertIds([]);
-        setIsLoading(false);
-        return;
-      }
-
-      // Wrap each query with its own timeout so one broken table never blocks the rest
-      const PER_QUERY_TIMEOUT_MS = 12_000;
-      const withTimeout = <T,>(promise: Promise<T>): Promise<T | { data: null; error: Error }> =>
-        Promise.race([
-          promise,
-          new Promise<{ data: null; error: Error }>((resolve) =>
-            setTimeout(
-              () => resolve({ data: null, error: new Error('Query timed out') }),
-              PER_QUERY_TIMEOUT_MS
-            )
-          ),
-        ]);
-
       try {
-        const rawFetch = async (table: string) => {
-          const res = await fetch(`${(import.meta as any).env.VITE_SUPABASE_URL}/rest/v1/${table}?select=*`, {
-            headers: { 'apikey': (import.meta as any).env.VITE_SUPABASE_ANON_KEY }
-          });
-          return { data: await res.json(), error: res.status !== 200 ? new Error(`HTTP ${res.status}`) : null };
-        };
+        if (!supabase) {
+          console.warn('Supabase client missing. Keeping current local state.');
+          return;
+        }
 
-        const [buyRes, lotRes, shpRes, docRes, routeRes, receiptRes] = await Promise.all([
-          rawFetch('buyers'),
-          rawFetch('lots'),
-          rawFetch('shipments'),
-          rawFetch('documents'),
-          rawFetch('routes'),
-          rawFetch('buyer_receipts'),
+        if (!user) {
+          setShipments([]);
+          setBuyers([]);
+          setDocuments([]);
+          setRoutes([]);
+          setLots([]);
+          setBuyerReceipts({});
+          setDismissedAlertIds([]);
+          return;
+        }
+
+        await refreshSupabaseSession();
+        if (cancelled) return;
+
+        console.log('--- SYSTEM DATA SYNC STARTING ---');
+        const [
+          buyersData,
+          shipmentsData,
+          documentsData,
+          routesData,
+          lotsData,
+          receiptsData
+        ] = await Promise.all([
+          queryTable('buyers', () => supabase.from('buyers').select('*')),
+          queryTable('shipments', () => supabase.from('shipments').select('*')),
+          queryTable('documents', () => supabase.from('documents').select('*')),
+          queryTable('routes', () => supabase.from('routes').select('*')),
+          queryTable('lots', () => supabase.from('lots').select('*')),
+          queryTable('buyer_receipts', () => supabase.from('buyer_receipts').select('*')),
         ]);
 
-        if (buyRes?.error) console.warn('Failed to load buyers', buyRes.error);
-        if (shpRes?.error) console.warn('Failed to load shipments', shpRes.error);
-        if (docRes?.error) console.warn('Failed to load documents', docRes.error);
-        if (routeRes?.error) console.warn('Failed to load routes', routeRes.error);
-        if (lotRes?.error) console.warn('Failed to load lots', lotRes.error);
-        if (receiptRes?.error) console.warn('Failed to load buyer_receipts', receiptRes.error);
+        console.log('--- SYSTEM DATA SYNC COMPLETE ---', {
+          buyers: !!buyersData,
+          shipments: !!shipmentsData,
+          documents: !!documentsData,
+          routes: !!routesData,
+          lots: !!lotsData,
+          receipts: !!receiptsData
+        });
 
-        const buyersUi = Array.isArray(buyRes?.data)
-          ? buyRes.data.map((x: any) => dbBuyerToUi(x as DbBuyer))
-          : [];
+        if (cancelled) return;
 
-        const shipmentsUi = Array.isArray(shpRes?.data)
-          ? shpRes.data.map((x: any) => ensureShipmentIntelligence(dbShipmentToUi(x as DbShipment)))
-          : [];
+        if (buyersData) setBuyers(buyersData.map((x: any) => dbBuyerToUi(x as DbBuyer)));
+        if (shipmentsData) {
+          setShipments(shipmentsData.map((x: any) => ensureShipmentIntelligence(dbShipmentToUi(x as DbShipment))));
+        }
+        if (documentsData) setDocuments(documentsData.map((x: any) => dbDocumentToUi(x as DbDocument)));
+        if (routesData) setRoutes(routesData.map((x: any) => dbRouteToUi(x as DbRoute)));
+        if (lotsData) setLots(lotsData.map((x: any) => dbLotToUi(x as DbLot)));
 
-        const docsUi = Array.isArray(docRes?.data)
-          ? docRes.data.map((x: any) => dbDocumentToUi(x as DbDocument))
-          : [];
-
-        const routesUi = Array.isArray(routeRes?.data)
-          ? routeRes.data.map((x: any) => dbRouteToUi(x as DbRoute))
-          : [];
-
-        const lotsUi = Array.isArray(lotRes?.data)
-          ? lotRes.data.map((x: any) => dbLotToUi(x as DbLot))
-          : [];
-
-        const receiptMap: Record<string, Record<string, BuyerReceipt>> = {};
-        if (Array.isArray(receiptRes?.data)) {
-          for (const r of receiptRes.data as any[]) {
+        if (receiptsData) {
+          const receiptMap: Record<string, Record<string, BuyerReceipt>> = {};
+          for (const r of receiptsData as any[]) {
             const key = String(r.buyer_id ?? '').toUpperCase();
             if (!key) continue;
             if (!receiptMap[key]) receiptMap[key] = {};
@@ -412,24 +471,31 @@ const InnerApp = () => {
               docIds: [],
             };
           }
+          setBuyerReceipts(receiptMap);
         }
-
-        setBuyers(buyersUi);
-        setShipments(shipmentsUi);
-        setDocuments(docsUi);
-        setRoutes(routesUi);
-        setLots(lotsUi);
-        setBuyerReceipts(receiptMap);
       } catch (error) {
         console.error('DATA FETCH ERROR:', error);
-        // Don't wipe existing state on unexpected error — leave whatever loaded
       } finally {
-        setIsLoading(false);
+        if (!cancelled) setIsLoading(false);
       }
     };
 
     void fetchInitialData();
+
+    return () => {
+      cancelled = true;
+    };
   }, [user?.id, authLoading]);
+
+  useEffect(() => {
+    if (!authLoading && isLoading) {
+      const timer = setTimeout(() => {
+        console.warn('Loading timeout reached (30s). Continuing with current data.');
+        setIsLoading(false);
+      }, 30000);
+      return () => clearTimeout(timer);
+    }
+  }, [authLoading, isLoading]);
 
   useEffect(() => {
     if ((import.meta as any)?.env?.VITE_GEMINI_API_KEY) {
@@ -452,13 +518,53 @@ const InnerApp = () => {
     [role, shipments, buyers, documents, routes, lots, displayCurrency, exchangeRates]
   );
 
+  const isMissingColumnError = (error: any) => {
+    const msg = String(error?.message ?? error ?? '').toLowerCase();
+    return msg.includes('column') && (msg.includes('does not exist') || msg.includes('schema cache'));
+  };
+
+  const legacyShipmentPayload = (s: Shipment) => ({
+    id: s.id,
+    buyerName: s.buyerName,
+    destination: s.destination,
+    value: Number(s.value ?? 0),
+    currency: s.currency ?? 'USD',
+    status: s.status,
+    riskLevel: s.riskLevel,
+    coffeeType: s.coffeeType,
+    weight: Number(s.weight ?? 0),
+    date: s.date ?? new Date().toISOString().slice(0, 10),
+    margin: Number(s.margin ?? 0),
+    incoterms: s.incoterms ?? 'FOB',
+    paymentTerms: s.paymentTerms ?? 'Advance Payment (TT)',
+  });
+
+  const legacyDocumentPayload = (doc: Document) => ({
+    id: doc.id,
+    shipmentId: doc.shipmentId,
+    name: doc.name,
+    type: doc.type,
+    status: doc.status,
+    date: doc.date ?? new Date().toISOString().slice(0, 10),
+    fileSize: doc.fileSize ?? null,
+    isExternal: !!doc.isExternal,
+  });
+
   const updateShipment = async (updated: Shipment) => {
-    const buyerId = updated.buyerId ?? buyers.find((b) => b.name === updated.buyerName)?.id;
+    const buyerId = updated.buyerId ?? buyers.find((b) => b.name.trim().toLowerCase() === updated.buyerName.trim().toLowerCase())?.id;
     if (!buyerId) throw new Error('Please select an existing buyer before saving.');
 
     if (supabase) {
       const payload = uiShipmentToDb(updated, buyerId, updated.routeId ?? null);
-      const { data, error } = await supabase.from('shipments').upsert(payload as any).select('*').single();
+      let { data, error } = await supabase.from('shipments').upsert(payload as any).select('*').single();
+
+      if (error && isMissingColumnError(error)) {
+        const fallback = legacyShipmentPayload({ ...updated, buyerId });
+        const res = await supabase.from('shipments').upsert(fallback as any).select('*').single();
+        data = res.data;
+        error = res.error;
+      }
+
       if (error) throw error;
 
       const saved = ensureShipmentIntelligence(dbShipmentToUi(data as DbShipment));
@@ -506,7 +612,10 @@ const InnerApp = () => {
     const normalized = { ...route, id: route.id || crypto.randomUUID() };
     if (supabase) {
       const payload = uiRouteToDb(normalized);
-      await supabase.from('routes').insert(payload as any);
+      const { data, error } = await supabase.from('routes').insert(payload as any).select('*').single();
+      if (error) throw error;
+      setRoutes((prev) => [dbRouteToUi(data as DbRoute), ...prev]);
+      return;
     }
     setRoutes((prev) => [normalized, ...prev]);
   };
@@ -514,14 +623,19 @@ const InnerApp = () => {
   const updateRoute = async (route: RouteTemplate) => {
     if (supabase) {
       const payload = uiRouteToDb(route);
-      await supabase.from('routes').upsert(payload as any);
+      const { data, error } = await supabase.from('routes').upsert(payload as any).select('*').single();
+      if (error) throw error;
+      const saved = dbRouteToUi(data as DbRoute);
+      setRoutes((prev) => prev.map((r) => (r.id === saved.id ? saved : r)));
+      return;
     }
     setRoutes((prev) => prev.map((r) => (r.id === route.id ? route : r)));
   };
 
   const deleteRoute = async (id: string) => {
     if (supabase) {
-      await supabase.from('routes').delete().eq('id', id);
+      const { error } = await supabase.from('routes').delete().eq('id', id);
+      if (error) throw error;
     }
     setRoutes((prev) => prev.filter((r) => r.id !== id));
     setShipments((prev) => prev.map((s) => (s.routeId === id ? { ...s, routeId: undefined } : s)));
@@ -531,7 +645,10 @@ const InnerApp = () => {
     const normalized = { ...lot, id: lot.id || crypto.randomUUID() };
     if (supabase) {
       const payload = uiLotToDb(normalized);
-      await supabase.from('lots').insert(payload as any);
+      const { data, error } = await supabase.from('lots').insert(payload as any).select('*').single();
+      if (error) throw error;
+      setLots((prev) => [dbLotToUi(data as DbLot), ...prev]);
+      return;
     }
     setLots((prev) => [normalized, ...prev]);
   };
@@ -539,14 +656,19 @@ const InnerApp = () => {
   const updateLot = async (lot: Lot) => {
     if (supabase) {
       const payload = uiLotToDb(lot);
-      await supabase.from('lots').upsert(payload as any);
+      const { data, error } = await supabase.from('lots').upsert(payload as any).select('*').single();
+      if (error) throw error;
+      const saved = dbLotToUi(data as DbLot);
+      setLots((prev) => prev.map((l) => (l.id === saved.id ? saved : l)));
+      return;
     }
     setLots((prev) => prev.map((l) => (l.id === lot.id ? lot : l)));
   };
 
   const deleteLot = async (id: string) => {
     if (supabase) {
-      await supabase.from('lots').delete().eq('id', id);
+      const { error } = await supabase.from('lots').delete().eq('id', id);
+      if (error) throw error;
     }
     setLots((prev) => prev.filter((l) => l.id !== id));
     setShipments((prev) =>
@@ -555,7 +677,7 @@ const InnerApp = () => {
   };
 
   const addShipment = async (shipment: Shipment) => {
-    const buyerId = shipment.buyerId ?? buyers.find((b) => b.name === shipment.buyerName)?.id;
+    const buyerId = shipment.buyerId ?? buyers.find((b) => b.name.trim().toLowerCase() === shipment.buyerName.trim().toLowerCase())?.id;
     if (!buyerId) throw new Error('Please select an existing buyer before saving.');
 
     const normalized: Shipment = ensureShipmentIntelligence({
@@ -566,20 +688,30 @@ const InnerApp = () => {
 
     if (supabase) {
       const payload = uiShipmentToDb(normalized, buyerId, normalized.routeId ?? null);
-      const { data, error } = await supabase.from('shipments').insert(payload as any).select('*').single();
+      let { data, error } = await supabase.from('shipments').insert(payload as any).select('*').single();
+
+      if (error && isMissingColumnError(error)) {
+        const fallback = legacyShipmentPayload(normalized);
+        const res = await supabase.from('shipments').insert(fallback as any).select('*').single();
+        data = res.data;
+        error = res.error;
+      }
+
       if (error) throw error;
 
       const inserted = ensureShipmentIntelligence(dbShipmentToUi(data as DbShipment));
       setShipments((prev) => [inserted, ...prev]);
-      return;
+      return inserted;
     }
 
     setShipments((prev) => [normalized, ...prev]);
+    return normalized;
   };
 
   const deleteShipment = async (id: string) => {
     if (supabase) {
-      await supabase.from('shipments').delete().eq('id', id);
+      const { error } = await supabase.from('shipments').delete().eq('id', id);
+      if (error) throw error;
     }
     setShipments((prev) => prev.filter((s) => s.id !== id));
   };
@@ -588,7 +720,10 @@ const InnerApp = () => {
     const normalized = { ...buyer, id: buyer.id || crypto.randomUUID() };
     if (supabase) {
       const payload = uiBuyerToDb(normalized);
-      await supabase.from('buyers').insert(payload as any);
+      const { data, error } = await supabase.from('buyers').insert(payload as any).select('*').single();
+      if (error) throw error;
+      setBuyers((prev) => [dbBuyerToUi(data as DbBuyer), ...prev]);
+      return;
     }
     setBuyers((prev) => [normalized, ...prev]);
   };
@@ -596,37 +731,75 @@ const InnerApp = () => {
   const updateBuyer = async (updated: Buyer) => {
     if (supabase) {
       const payload = uiBuyerToDb(updated);
-      await supabase.from('buyers').upsert(payload as any);
+      const { data, error } = await supabase.from('buyers').upsert(payload as any).select('*').single();
+      if (error) throw error;
+      const saved = dbBuyerToUi(data as DbBuyer);
+      setBuyers((prev) => prev.map((b) => (b.id === saved.id ? saved : b)));
+      return;
     }
     setBuyers((prev) => prev.map((b) => (b.id === updated.id ? updated : b)));
   };
 
   const deleteBuyer = async (id: string) => {
     if (supabase) {
-      await supabase.from('buyers').delete().eq('id', id);
+      const { error } = await supabase.from('buyers').delete().eq('id', id);
+      if (error) throw error;
     }
     setBuyers((prev) => prev.filter((b) => b.id !== id));
   };
 
   const addDocument = async (doc: Document) => {
-    const normalized = {
+    const linkedShipment = doc.shipmentId ? shipments.find((s) => s.id === doc.shipmentId) : undefined;
+    const normalized: Document = {
       ...doc,
       id: doc.id || crypto.randomUUID(),
+      buyerId: doc.buyerId ?? linkedShipment?.buyerId,
       buyerVisible: doc.buyerVisible ?? false,
     };
+
     if (supabase) {
       const payload = uiDocumentToDb(normalized);
-      await supabase.from('documents').insert(payload as any);
+      let { data, error } = await supabase.from('documents').insert(payload as any).select('*').single();
+
+      if (error && isMissingColumnError(error)) {
+        const fallback = legacyDocumentPayload(normalized);
+        const res = await supabase.from('documents').insert(fallback as any).select('*').single();
+        data = res.data;
+        error = res.error;
+      }
+
+      if (error) throw error;
+      setDocuments((prev) => [...prev, dbDocumentToUi(data as DbDocument)]);
+      return;
     }
     setDocuments((prev) => [...prev, normalized]);
   };
 
   const updateDocument = async (updated: Document) => {
+    const linkedShipment = updated.shipmentId ? shipments.find((s) => s.id === updated.shipmentId) : undefined;
+    const normalized: Document = {
+      ...updated,
+      buyerId: updated.buyerId ?? linkedShipment?.buyerId,
+      buyerVisible: updated.buyerVisible ?? false,
+    };
+
     if (supabase) {
-      const payload = uiDocumentToDb(updated);
-      await supabase.from('documents').upsert(payload as any);
+      const payload = uiDocumentToDb(normalized);
+      let { data, error } = await supabase.from('documents').upsert(payload as any).select('*').single();
+
+      if (error && isMissingColumnError(error)) {
+        const fallback = legacyDocumentPayload(normalized);
+        const res = await supabase.from('documents').upsert(fallback as any).select('*').single();
+        data = res.data;
+        error = res.error;
+      }
+
+      if (error) throw error;
+      const saved = dbDocumentToUi(data as DbDocument);
+      setDocuments((prev) => prev.map((d) => (d.id === saved.id ? saved : d)));
+      return;
     }
-    setDocuments((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
+    setDocuments((prev) => prev.map((d) => (d.id === normalized.id ? normalized : d)));
   };
 
   const dismissAlert = async (id: string) => {
